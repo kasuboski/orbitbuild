@@ -1,0 +1,27 @@
+[package]
+name = "orbitbuild"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iroh = { version = "0.97", default-features = false }
+iroh-docs = "0.97"
+iroh-blobs = "0.99"
+iroh-gossip = "0.97"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+bytes = "1"
+postcard = { version = "1", features = ["use-std"] }
+rand = "0.9"
+futures-lite = "2"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"

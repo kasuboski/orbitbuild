@@ -21,8 +21,17 @@ Security Model
     Transport: All traffic is encrypted end-to-end via TLS 1.3 (provided by Iroh/QUIC).
 
 Knowledge
+    @SPEC.md outlines the general idea and UX. @ARCH.md outlines the technical architecture.
     There is a folder called knowledge/ that has information that may be helpful. Explore this folder when asking questions.
     In particular knowledge/repos has git clones of projects we depend on (iroh) and examples (dumbpipe)
+
+Development Environment
+
+    mise is the primary task runner and toolchain manager. Run `mise install` to install Rust and other tools.
+    Available mise tasks: build, lint, test, check. Run with `mise run <task>`.
+    Cargo.toml is in the repo root.
+
+    A flake.nix is also checked in for NixOS users (or anyone preferring nix). It provides system dependencies that mise doesn't cover (gcc, pkg-config, openssl). On NixOS, enter the dev shell first: `nix develop`, then use mise/cargo as normal. Non-Nix users can ignore flake.nix entirely.
 
 Development Process
     Always use mise for project dependencies.
