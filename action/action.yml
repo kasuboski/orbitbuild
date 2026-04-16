@@ -1,0 +1,16 @@
+name: 'OrbitBuild Setup'
+description: 'Connect to an OrbitBuild Constellation for multi-arch Docker builds'
+inputs:
+  beacon:
+    description: 'The ORBIT_BEACON secret'
+    required: true
+  platforms:
+    description: 'Comma-separated architectures to link'
+    default: 'linux/amd64,linux/arm64'
+  version:
+    description: 'OrbitBuild version to download (default: latest)'
+    default: 'latest'
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
+  post: 'dist/cleanup.js'

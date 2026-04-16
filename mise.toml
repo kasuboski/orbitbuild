@@ -1,21 +1,39 @@
 [tools]
 rust = "latest"
+node = "24"
+actionlint = "latest"
 
 [tasks.build]
 description = "Build the project"
 run = "cargo build"
 
+[tasks.check]
+description = "Quick check for compilation errors"
+run = "cargo check"
+
+[tasks.check-musl]
+description = "Check musl static build compiles (requires musl-tools + rustup target add x86_64-unknown-linux-musl)"
+run = "cargo check --target x86_64-unknown-linux-musl"
+
 [tasks.lint]
-description = "Run clippy lints"
+description = "Run all linters (Rust + workflows + action TS)"
+depends = ["lint-rust", "lint-workflows", "lint-action"]
+
+[tasks.lint-rust]
+description = "Run clippy lints only"
 run = "cargo clippy -- -D warnings"
+
+[tasks.lint-workflows]
+description = "Lint GitHub workflows with actionlint"
+run = "actionlint"
+
+[tasks.lint-action]
+description = "Lint action TypeScript"
+run = "cd action && npm run lint"
 
 [tasks.test]
 description = "Run tests"
 run = "cargo test"
-
-[tasks.check]
-description = "Quick check for compilation errors"
-run = "cargo check"
 
 [tasks.integration-test]
 description = "Run 3-node integration test (station + satellite + mission-control)"

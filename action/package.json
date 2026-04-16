@@ -1,0 +1,27 @@
+{
+  "name": "@orbitbuild/setup-action",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub Action to set up OrbitBuild for multi-arch Docker builds",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/main.ts -o dist --minify",
+    "build:cleanup": "ncc build src/cleanup.ts -o dist/cleanup.js --minify",
+    "build:all": "npm run build && npm run build:cleanup",
+    "lint": "tsc --noEmit",
+    "format:check": "prettier --check 'src/**/*.ts'",
+    "format": "prettier --write 'src/**/*.ts'"
+  },
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/exec": "^1.1.1",
+    "@actions/io": "^1.1.3",
+    "@actions/tool-cache": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vercel/ncc": "^0.38.3",
+    "prettier": "^3.2.0",
+    "typescript": "^5.8.0"
+  }
+}

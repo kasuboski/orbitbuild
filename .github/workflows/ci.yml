@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check-and-test:
+    name: Check, Lint & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Install musl target
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-
+
+      - name: Check musl
+        run: mise run check-musl
+
+      - name: Lint Rust
+        run: mise run lint-rust
+
+      - name: Test
+        run: mise run test
+
+  lint-action:
+    name: Lint Action
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Install dependencies
+        run: cd action && npm install
+
+      - name: Verify dist is up to date
+        run: |
+          cd action
+          npm run build:all
+          if ! git diff --quiet -- action/dist/; then
+            echo "::error::action/dist/ is out of date. Run 'cd action && npm run build:all' and commit."
+            git diff --stat -- action/dist/
+            exit 1
+          fi
+
+      - name: Lint TypeScript
+        run: mise run lint-action
+
+  lint-workflows:
+    name: Lint Workflows
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Run actionlint
+        run: mise run lint-workflows

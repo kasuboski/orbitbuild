@@ -9,4 +9,7 @@ Cargo.lock
 
 /target
 
+# GitHub Action
+action/node_modules/
+
 STATUS.md

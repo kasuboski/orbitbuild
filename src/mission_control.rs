@@ -71,13 +71,15 @@ pub async fn run_mission_control(config: MissionControlConfig) -> Result<()> {
     for platform in &config.platforms {
         let arch = platform_to_arch(platform);
 
-        if let Some(satellite_entry) = select_satellite_for_arch(&satellite_entries, arch) {
+        if let Some(satellite_entry) = select_satellite_for_platform(&satellite_entries, platform) {
             let socket_path = socket_path_for_platform(&config.socket_dir, platform);
+            let is_native = satellite_entry.native_arch == arch;
             tracing::info!(
                 platform = %platform,
                 arch = %arch,
                 socket = %socket_path.display(),
                 satellite = ?satellite_entry.endpoint_addr,
+                native = is_native,
                 "selected satellite for platform"
             );
             let bridge = Bridge::new(
@@ -145,14 +147,14 @@ pub async fn run_mission_control(config: MissionControlConfig) -> Result<()> {
                                                         String::from_utf8_lossy(node_id_hex_bytes);
                                                     tracing::info!(
                                                         satellite = %node_id_hex,
-                                                        arch = %sat_entry.arch,
+                                                        arch = %sat_entry.native_arch,
                                                         status = %sat_entry.status,
                                                         "satellite entry updated in doc"
                                                     );
                                                     if sat_entry.status == "offline" {
                                                         tracing::warn!(
                                                             satellite = %node_id_hex,
-                                                            arch = %sat_entry.arch,
+                                                            arch = %sat_entry.native_arch,
                                                             "satellite went offline"
                                                         );
                                                     }
@@ -321,7 +323,7 @@ pub async fn discover_satellites(
                         Ok(sat_entry) => {
                             tracing::debug!(
                                 node_id = %node_id_hex,
-                                arch = %sat_entry.arch,
+                                arch = %sat_entry.native_arch,
                                 status = %sat_entry.status,
                                 "discovered satellite"
                             );
@@ -351,17 +353,38 @@ pub async fn discover_satellites(
     Ok(satellite_entries)
 }
 
-/// Select the best satellite for a given architecture.
+/// Select the best satellite for a given platform.
 ///
-/// Picks idle satellites matching the requested arch. If multiple matches,
-/// returns the one with the most recent `registered_at` timestamp.
-fn select_satellite_for_arch<'a>(
+/// Prefers satellites where the platform is their native arch (fastest).
+/// Falls back to satellites that advertise the platform via emulation.
+/// Among ties, picks the one with the most recent `registered_at` timestamp.
+pub fn select_satellite_for_platform<'a>(
     entries: &'a [(String, SatelliteEntry)],
-    arch: &str,
+    platform: &str,
 ) -> Option<&'a SatelliteEntry> {
+    let arch = crate::docker::platform_to_arch(platform);
+
+    // Try native first
+    let native = entries
+        .iter()
+        .filter(|(_, entry)| {
+            entry.status == "idle"
+                && entry.native_arch == arch
+        })
+        .max_by_key(|(_, entry)| entry.registered_at)
+        .map(|(_, entry)| entry);
+
+    if native.is_some() {
+        return native;
+    }
+
+    // Fall back to any satellite that advertises this platform (emulated)
     entries
         .iter()
-        .filter(|(_, entry)| entry.arch == arch && entry.status == "idle")
+        .filter(|(_, entry)| {
+            entry.status == "idle"
+                && entry.platforms.iter().any(|p| p == platform)
+        })
         .max_by_key(|(_, entry)| entry.registered_at)
         .map(|(_, entry)| entry)
 }
@@ -439,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_satellite_for_arch() {
+    fn test_select_satellite_for_platform() {
         let pk1 = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         let pk2 = iroh::SecretKey::generate(&mut rand::rng()).public();
 
@@ -447,7 +470,8 @@ mod tests {
             (
                 "node1".to_string(),
                 SatelliteEntry {
-                    arch: "amd64".to_string(),
+                    native_arch: "amd64".to_string(),
+                    platforms: vec!["linux/amd64".to_string()],
                     status: "idle".to_string(),
                     endpoint_addr: iroh::EndpointAddr::new(pk1),
                     registered_at: 1000,
@@ -456,7 +480,8 @@ mod tests {
             (
                 "node2".to_string(),
                 SatelliteEntry {
-                    arch: "arm64".to_string(),
+                    native_arch: "arm64".to_string(),
+                    platforms: vec!["linux/arm64".to_string()],
                     status: "idle".to_string(),
                     endpoint_addr: iroh::EndpointAddr::new(pk2),
                     registered_at: 2000,
@@ -464,23 +489,24 @@ mod tests {
             ),
         ];
 
-        let result = select_satellite_for_arch(&entries, "amd64");
+        let result = select_satellite_for_platform(&entries, "linux/amd64");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().arch, "amd64");
+        assert_eq!(result.unwrap().native_arch, "amd64");
 
-        let result = select_satellite_for_arch(&entries, "arm64");
+        let result = select_satellite_for_platform(&entries, "linux/arm64");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().arch, "arm64");
+        assert_eq!(result.unwrap().native_arch, "arm64");
     }
 
     #[test]
-    fn test_select_satellite_for_arch_none_available() {
+    fn test_select_satellite_for_platform_none_available() {
         let pk = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         let pk2 = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         let entries = vec![(
             "node1".to_string(),
             SatelliteEntry {
-                arch: "amd64".to_string(),
+                native_arch: "amd64".to_string(),
+                platforms: vec!["linux/amd64".to_string()],
                 status: "busy".to_string(),
                 endpoint_addr: iroh::EndpointAddr::new(pk),
                 registered_at: 1000,
@@ -488,29 +514,30 @@ mod tests {
         )];
 
         // No match: wrong status
-        let result = select_satellite_for_arch(&entries, "amd64");
+        let result = select_satellite_for_platform(&entries, "linux/amd64");
         assert!(result.is_none());
 
-        // No match: wrong arch
+        // No match: platform not advertised
         let entries_idle = vec![(
             "node1".to_string(),
             SatelliteEntry {
-                arch: "amd64".to_string(),
+                native_arch: "amd64".to_string(),
+                platforms: vec!["linux/amd64".to_string()],
                 status: "idle".to_string(),
                 endpoint_addr: iroh::EndpointAddr::new(pk2),
                 registered_at: 1000,
             },
         )];
-        let result = select_satellite_for_arch(&entries_idle, "arm64");
+        let result = select_satellite_for_platform(&entries_idle, "linux/arm64");
         assert!(result.is_none());
 
         // Empty list
-        let result = select_satellite_for_arch(&[], "amd64");
+        let result = select_satellite_for_platform(&[], "linux/amd64");
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_select_satellite_for_arch_prefers_recent() {
+    fn test_select_satellite_for_platform_prefers_recent() {
         let pk1 = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         let pk2 = iroh::SecretKey::generate(&mut rand::rng()).public();
 
@@ -518,26 +545,69 @@ mod tests {
             (
                 "node1".to_string(),
                 SatelliteEntry {
-                    arch: "amd64".to_string(),
+                    native_arch: "amd64".to_string(),
+                    platforms: vec!["linux/amd64".to_string()],
                     status: "idle".to_string(),
                     endpoint_addr: iroh::EndpointAddr::new(pk1),
-                    registered_at: 1000, // older
+                    registered_at: 1000,
                 },
             ),
             (
                 "node2".to_string(),
                 SatelliteEntry {
-                    arch: "amd64".to_string(),
+                    native_arch: "amd64".to_string(),
+                    platforms: vec!["linux/amd64".to_string()],
                     status: "idle".to_string(),
                     endpoint_addr: iroh::EndpointAddr::new(pk2),
-                    registered_at: 5000, // newer
+                    registered_at: 5000,
                 },
             ),
         ];
 
-        let result = select_satellite_for_arch(&entries, "amd64");
+        let result = select_satellite_for_platform(&entries, "linux/amd64");
         assert!(result.is_some());
-        // Should pick the one with registered_at = 5000 (node2)
         assert_eq!(result.unwrap().registered_at, 5000);
+    }
+
+    #[test]
+    fn test_select_satellite_prefers_native_over_emulated() {
+        let pk_native = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
+        let pk_emulated = iroh::SecretKey::generate(&mut rand::rng()).public();
+
+        // node1: native arm64, can also build amd64 via emulation
+        // node2: native amd64, can also build arm64 via emulation
+        // Both advertise linux/arm64 — node1 should be preferred because it's native
+        let entries = vec![
+            (
+                "node1".to_string(),
+                SatelliteEntry {
+                    native_arch: "arm64".to_string(),
+                    platforms: vec!["linux/arm64".to_string(), "linux/amd64".to_string()],
+                    status: "idle".to_string(),
+                    endpoint_addr: iroh::EndpointAddr::new(pk_native),
+                    registered_at: 1000,
+                },
+            ),
+            (
+                "node2".to_string(),
+                SatelliteEntry {
+                    native_arch: "amd64".to_string(),
+                    platforms: vec!["linux/amd64".to_string(), "linux/arm64".to_string()],
+                    status: "idle".to_string(),
+                    endpoint_addr: iroh::EndpointAddr::new(pk_emulated),
+                    registered_at: 5000, // newer heartbeat, but emulated
+                },
+            ),
+        ];
+
+        // Should pick node1 (native arm64) even though node2 has a newer heartbeat
+        let result = select_satellite_for_platform(&entries, "linux/arm64");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().native_arch, "arm64");
+
+        // For linux/amd64, node2 is native
+        let result = select_satellite_for_platform(&entries, "linux/amd64");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().native_arch, "amd64");
     }
 }

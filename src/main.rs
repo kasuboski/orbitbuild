@@ -45,11 +45,14 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Satellite(cmd) => match cmd {
-            SatelliteCommand::Join { beacon, buildkitd_socket } => {
+            SatelliteCommand::Join { beacon, buildkitd_socket, platforms } => {
                 tracing::info!(beacon = %beacon, "satellite join");
                 let beacon: Beacon = beacon.parse()?;
                 let buildkitd_socket = buildkitd_socket.map(std::path::PathBuf::from);
-                orbitbuild::satellite::run_satellite_join(beacon, &data_dir, buildkitd_socket).await?;
+                let extra_platforms = platforms
+                    .map(|p| orbitbuild::satellite::parse_satellite_platforms(&p))
+                    .transpose()?;
+                orbitbuild::satellite::run_satellite_join(beacon, &data_dir, buildkitd_socket, extra_platforms).await?;
             }
         },
         Commands::MissionControl { beacon, platforms } => {

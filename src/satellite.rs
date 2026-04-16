@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use iroh::protocol::AccessLimit;
 use iroh::EndpointId;
@@ -41,11 +41,30 @@ pub async fn run_satellite_join(
     beacon: Beacon,
     data_dir: &std::path::Path,
     buildkitd_socket: Option<PathBuf>,
+    extra_platforms: Option<Vec<String>>,
 ) -> Result<()> {
     let buildkitd_socket = buildkitd_socket
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BUILDKITD_SOCKET));
 
     let buildkitd_socket_display = buildkitd_socket.display();
+
+    // Resolve platforms: native is always first, then any user-specified extras
+    let native_arch = arch_str();
+    let native_platform = format!("linux/{native_arch}");
+    let mut platforms = vec![native_platform.clone()];
+    if let Some(extra) = extra_platforms {
+        for p in extra {
+            if p != native_platform {
+                platforms.push(p);
+            }
+        }
+    }
+
+    tracing::info!(
+        native_arch = %native_arch,
+        platforms = ?platforms,
+        "satellite platform configuration"
+    );
 
     // Shared set of allowed peer EndpointIds (maintained from Doc subscription)
     let allowed_peers: Arc<RwLock<HashSet<EndpointId>>> =
@@ -118,9 +137,9 @@ pub async fn run_satellite_join(
 
     // Write self-registration entry
     let entry_key = format!("satellite/{node_id}");
-    let arch = arch_str();
     let registration = SatelliteEntry {
-        arch: arch.to_string(),
+        native_arch: native_arch.to_string(),
+        platforms: platforms.clone(),
         status: SatelliteStatus::Idle.to_string(),
         endpoint_addr: endpoint.addr(),
         registered_at: chrono_now_secs(),
@@ -134,14 +153,16 @@ pub async fn run_satellite_join(
 
     tracing::info!(
         node_id = ?node_id,
-        arch = %arch,
+        native_arch = %native_arch,
+        platforms = ?platforms,
         key = %entry_key,
         "satellite registered in doc"
     );
 
     eprintln!("Satellite joined the Constellation.");
     eprintln!("  Node ID: {:?}", node_id);
-    eprintln!("  Arch: {arch}");
+    eprintln!("  Native arch: {native_arch}");
+    eprintln!("  Platforms: {}", platforms.join(", "));
     eprintln!("  buildkitd socket: {buildkitd_socket_display}");
     eprintln!();
     eprintln!("Satellite is listening... (Ctrl+C to stop)");
@@ -194,14 +215,16 @@ pub async fn run_satellite_join(
     let heartbeat_doc = doc.clone();
     let heartbeat_key = entry_key.clone();
     let heartbeat_author = author;
-    let heartbeat_arch = arch.to_string();
+    let heartbeat_platforms = platforms.clone();
+    let heartbeat_native_arch = native_arch.to_string();
     let heartbeat_addr = endpoint.addr();
     let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         loop {
             interval.tick().await;
             let registration = SatelliteEntry {
-                arch: heartbeat_arch.clone(),
+                native_arch: heartbeat_native_arch.clone(),
+                platforms: heartbeat_platforms.clone(),
                 status: SatelliteStatus::Idle.to_string(),
                 endpoint_addr: heartbeat_addr.clone(),
                 registered_at: chrono_now_secs(),
@@ -228,7 +251,8 @@ pub async fn run_satellite_join(
 
     // Set status to offline
     let offline_entry = SatelliteEntry {
-        arch: arch.to_string(),
+        native_arch: native_arch.to_string(),
+        platforms,
         status: SatelliteStatus::Offline.to_string(),
         endpoint_addr: iroh::EndpointAddr::new(iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap()),
         registered_at: chrono_now_secs(),
@@ -268,8 +292,17 @@ fn parse_node_id_from_hex(hex_bytes: &[u8]) -> Option<iroh::PublicKey> {
 /// can deserialize it directly into an `EndpointAddr` for `endpoint.connect()`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SatelliteEntry {
-    /// Architecture (e.g., "arm64", "amd64").
-    pub arch: String,
+    /// The satellite's native architecture (e.g., "arm64", "amd64").
+    ///
+    /// This is the hardware architecture detected at startup — builds for
+    /// this platform run at full native speed.
+    pub native_arch: String,
+    /// All platforms this satellite can build, including native + emulated.
+    ///
+    /// The native platform is always first. Additional platforms (e.g.,
+    /// `linux/arm64` on an amd64 host with QEMU) are listed after.
+    /// Mission Control prefers native over emulated when selecting satellites.
+    pub platforms: Vec<String>,
     /// Current status: "idle", "busy", "offline".
     pub status: String,
     /// The satellite's endpoint address for direct connection.
@@ -308,6 +341,32 @@ pub fn arch_str() -> &'static str {
     }
 }
 
+/// Parse a comma-separated platforms string into a Vec of platform strings.
+///
+/// Validates that each platform starts with `"linux/"`. Used by the CLI
+/// for the `satellite join --platforms` flag.
+///
+/// # Examples
+/// - `"linux/arm64"` → `vec!["linux/arm64"]`
+/// - `"linux/amd64,linux/arm64"` → `vec!["linux/amd64", "linux/arm64"]`
+pub fn parse_satellite_platforms(platforms_str: &str) -> Result<Vec<String>> {
+    let platforms: Vec<String> = platforms_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for platform in &platforms {
+        ensure!(
+            platform.starts_with("linux/"),
+            "unsupported platform '{}': only linux/* platforms are supported",
+            platform
+        );
+    }
+
+    Ok(platforms)
+}
+
 /// Get current time as Unix timestamp seconds.
 fn chrono_now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -339,7 +398,8 @@ mod tests {
         let addr = iroh::EndpointAddr::new(pk)
             .with_relay_url("https://relay.iroh.network".parse().unwrap());
         let entry = SatelliteEntry {
-            arch: "arm64".into(),
+            native_arch: "arm64".into(),
+            platforms: vec!["linux/arm64".into()],
             status: "idle".into(),
             endpoint_addr: addr,
             registered_at: 1713123456,
@@ -347,6 +407,26 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: SatelliteEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, entry);
+    }
+
+    #[test]
+    fn satellite_entry_with_emulation() {
+        let pk = iroh::PublicKey::from_bytes(&[42u8; 32]).unwrap();
+        let addr = iroh::EndpointAddr::new(pk);
+        let entry = SatelliteEntry {
+            native_arch: "amd64".into(),
+            platforms: vec![
+                "linux/amd64".into(),
+                "linux/arm64".into(),
+            ],
+            status: "idle".into(),
+            endpoint_addr: addr,
+            registered_at: 1713123456,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: SatelliteEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.native_arch, "amd64");
+        assert_eq!(decoded.platforms, vec!["linux/amd64", "linux/arm64"]);
     }
 
     #[test]
@@ -360,21 +440,46 @@ mod tests {
     fn satellite_entry_json_format() {
         let pk = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         let entry = SatelliteEntry {
-            arch: "amd64".into(),
+            native_arch: "amd64".into(),
+            platforms: vec!["linux/amd64".into()],
             status: "idle".into(),
             endpoint_addr: iroh::EndpointAddr::new(pk),
             registered_at: 12345,
         };
         let json = serde_json::to_string_pretty(&entry).unwrap();
-        assert!(json.contains("\"arch\""));
+        assert!(json.contains("\"native_arch\""));
+        assert!(json.contains("\"platforms\""));
         assert!(json.contains("\"status\""));
         assert!(json.contains("\"endpoint_addr\""));
         assert!(json.contains("\"registered_at\""));
     }
 
     #[test]
+    fn parse_satellite_platforms_single() {
+        let result = parse_satellite_platforms("linux/arm64").unwrap();
+        assert_eq!(result, vec!["linux/arm64"]);
+    }
+
+    #[test]
+    fn parse_satellite_platforms_multiple() {
+        let result = parse_satellite_platforms("linux/amd64,linux/arm64").unwrap();
+        assert_eq!(result, vec!["linux/amd64", "linux/arm64"]);
+    }
+
+    #[test]
+    fn parse_satellite_platforms_rejects_non_linux() {
+        let result = parse_satellite_platforms("darwin/amd64");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_satellite_platforms_empty() {
+        let result = parse_satellite_platforms("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
     fn parse_node_id_from_hex_valid() {
-        // Create a valid PublicKey and test round-trip through hex
         let pk = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         let hex = data_encoding::HEXLOWER.encode(pk.as_bytes());
         let parsed = parse_node_id_from_hex(hex.as_bytes());

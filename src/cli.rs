@@ -100,5 +100,15 @@ pub enum SatelliteCommand {
         /// Defaults to /run/buildkit/buildkitd.sock.
         #[clap(long)]
         buildkitd_socket: Option<String>,
+
+        /// Comma-separated platforms this satellite can build.
+        ///
+        /// The native platform is always included automatically.
+        /// Add additional platforms if this satellite has QEMU/binfmt
+        /// configured for cross-architecture builds.
+        ///
+        /// Example: --platforms linux/arm64 (on an amd64 host with QEMU)
+        #[clap(long)]
+        platforms: Option<String>,
     },
 }

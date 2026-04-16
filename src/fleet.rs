@@ -109,8 +109,8 @@ fn format_timestamp(ts: u64) -> String {
 /// Print the fleet table header and rows.
 fn print_fleet_table(satellites: &[(String, SatelliteEntry)]) {
     println!(
-        "{:<52} {:<8} {:<10} REGISTERED",
-        "NODE ID", "ARCH", "STATUS"
+        "{:<20} {:<12} {:<30} {:<10} REGISTERED",
+        "NODE ID", "NATIVE", "PLATFORMS", "STATUS"
     );
     for (node_id, entry) in satellites {
         let row = format_satellite_row(node_id, entry);
@@ -120,10 +120,18 @@ fn print_fleet_table(satellites: &[(String, SatelliteEntry)]) {
 
 /// Format a single satellite table row.
 fn format_satellite_row(node_id: &str, entry: &SatelliteEntry) -> String {
+    // Truncate node ID to first 16 chars
+    let short_id = if node_id.len() > 16 {
+        &node_id[..16]
+    } else {
+        node_id
+    };
+    let platforms_str = entry.platforms.join(", ");
     format!(
-        "{:<52} {:<8} {:<10} {}",
-        node_id,
-        entry.arch,
+        "{:<20} {:<12} {:<30} {:<10} {}",
+        short_id,
+        entry.native_arch,
+        platforms_str,
         entry.status,
         format_timestamp(entry.registered_at)
     )
@@ -137,10 +145,11 @@ fn format_satellite_row(node_id: &str, entry: &SatelliteEntry) -> String {
 mod tests {
     use super::*;
 
-    fn make_entry(arch: &str, status: &str, registered_at: u64) -> SatelliteEntry {
+    fn make_entry(native_arch: &str, platforms: &[&str], status: &str, registered_at: u64) -> SatelliteEntry {
         let pk = iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap();
         SatelliteEntry {
-            arch: arch.to_string(),
+            native_arch: native_arch.to_string(),
+            platforms: platforms.iter().map(|s| s.to_string()).collect(),
             status: status.to_string(),
             endpoint_addr: iroh::EndpointAddr::new(pk),
             registered_at,
@@ -149,11 +158,18 @@ mod tests {
 
     #[test]
     fn test_format_satellite_row() {
-        let entry = make_entry("amd64", "idle", 1713264000);
+        let entry = make_entry("amd64", &["linux/amd64"], "idle", 1713264000);
         let row = format_satellite_row("abc123", &entry);
         assert!(row.contains("abc123"));
         assert!(row.contains("amd64"));
         assert!(row.contains("idle"));
+    }
+
+    #[test]
+    fn test_format_satellite_row_with_emulation() {
+        let entry = make_entry("amd64", &["linux/amd64", "linux/arm64"], "idle", 1713264000);
+        let row = format_satellite_row("abc123", &entry);
+        assert!(row.contains("linux/amd64, linux/arm64"));
     }
 
     #[test]
