@@ -53,6 +53,9 @@ jobs:
       - name: Check musl
         run: mise run check-musl
 
+      - name: Install clippy
+        run: rustup component add clippy
+
       - name: Lint Rust
         run: mise run lint-rust
 
