@@ -72,13 +72,14 @@ Entries use **path-structured keys** with a common prefix:
 
 | Key pattern | Value (JSON) | Written by |
 |---|---|---|
-| `satellite/<node_id_hex>` | `{ arch, status, endpoint_addr, registered_at }` | Satellite |
+| `satellite/<node_id_hex>` | `{ native_arch, platforms, status, endpoint_addr, registered_at }` | Satellite |
 
 **Example satellite entry:**
 
 ```json
 {
-  "arch": "arm64",
+  "native_arch": "arm64",
+  "platforms": ["linux/arm64"],
   "status": "idle",
   "endpoint_addr": "relay:https://relay.iroh.network/...",
   "registered_at": 1713123456
@@ -141,7 +142,7 @@ The Beacon wraps a `DocTicket`, which carries:
 
 **Authorization is derived from membership.** Anyone holding the Beacon can import the Doc, sync state, and connect to Satellites. The DocTicket's embedded capability keys are the single gate — there is no separate shared secret.
 
-The Beacon is safe to store as a GitHub Actions secret, pass as an environment variable (`ORBIT_BEACON`), or share in a chat message.
+The Beacon is safe to store as a GitHub Actions secret or pass as an environment variable (`ORBIT_BEACON`).
 
 ---
 
@@ -174,25 +175,20 @@ Both sides run `tokio::io::copy_bidirectional` to pipe bytes in both directions.
 
 ### Authorization
 
-The Satellite's BuildProxy is wrapped in `iroh::protocol::AccessLimit`, which rejects connections from endpoints that are not known members of the Constellation Doc:
+Possession of the Beacon (DocTicket) is the sole authorization mechanism. Any node that can import the Doc is a Constellation member and may connect to Satellites' buildkitd instances. There is no additional access control layer — the Beacon is the single gate.
 
 ```rust
-let allowed_peers = Arc::new(known_peer_set); // maintained from Doc subscription
-
-let build_proxy = AccessLimit::new(
-    BuildProxy { buildkitd_socket },
-    move |endpoint_id| allowed_peers.contains(&endpoint_id),
-);
+let build_proxy = BuildProxy::new(buildkitd_socket);
 
 Router::builder(endpoint)
     .accept(BLOBS_ALPN, blobs)
     .accept(GOSSIP_ALPN, gossip)
     .accept(DOCS_ALPN, docs)
-    .accept(BUILD_ALPN, build_proxy)  // gated by AccessLimit
+    .accept(BUILD_ALPN, build_proxy)
     .spawn()
 ```
 
-The Satellite maintains the `allowed_peers` set from its Doc subscription — every time a peer joins/leaves the Doc, the set updates. This means:
+This means:
 
 - To connect to a Satellite's buildkitd, you must be a Constellation member.
 - To be a Constellation member, you must hold the Beacon (DocTicket).
@@ -208,9 +204,13 @@ struct BuildProxy {
 
 impl ProtocolHandler for BuildProxy {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let (mut send, mut recv) = connection.accept_bi().await?;
-        let mut unix = UnixStream::connect(&self.buildkitd_socket).await?;
-        tokio::io::copy_bidirectional(&mut unix, &mut (&mut recv, &mut send)).await?;
+        let (mut quic_send, mut quic_recv) = connection.accept_bi().await?;
+        let unix = UnixStream::connect(&self.buildkitd_socket).await?;
+        let (mut unix_read, mut unix_write) = tokio::io::split(unix);
+        tokio::try_join!(
+            tokio::io::copy(&mut unix_read, &mut quic_send),
+            tokio::io::copy(&mut quic_recv, &mut unix_write),
+        )?;
         Ok(())
     }
 }
@@ -257,14 +257,13 @@ The Station does **not** register itself as a satellite. It is the seed node tha
 3. Parse Beacon → get DocTicket
 4. Spawn Blobs + Gossip + Docs protocols
 5. Import Doc from ticket → subscribe to live events
-6. Maintain allowed_peers set from Doc subscription (for AccessLimit)
-7. Write self-registration entry into Doc:
+6. Write self-registration entry into Doc:
    key:   "satellite/<my_node_id_hex>"
-   value: { arch, status: "idle", endpoint_addr, registered_at }
-8. Spawn BuildProxy (gated by AccessLimit) on Router
-9. Start heartbeat: update Doc entry every 30s (or on status change)
-10. Accept proxied buildkitd sessions via BuildProxy
-11. On shutdown: set status to "offline" (or delete entry)
+   value: { native_arch, platforms, status: "idle", endpoint_addr, registered_at }
+7. Spawn BuildProxy on Router
+8. Start heartbeat: update Doc entry every 30s (or on status change)
+9. Accept proxied buildkitd sessions via BuildProxy
+10. On shutdown: set status to "offline" (or delete entry)
 ```
 
 ### Mission Control (`orbitbuild mission-control --beacon <BEACON>`)
@@ -321,13 +320,13 @@ The Station does **not** register itself as a satellite. It is the seed node tha
 │                        Constellation Doc                         │
 │         (iroh-docs CRDT — replicated to all nodes)              │
 │                                                                  │
-│  ┌─────────────────────┐  ┌─────────────────────┐               │
-│  │ satellite/abc123     │  │ satellite/def456     │  ...          │
-│  │ { arch: "arm64",    │  │ { arch: "amd64",    │               │
-│  │   status: "idle",   │  │   status: "idle",   │               │
-│  │   endpoint_addr: .. │  │   endpoint_addr: .. │               │
-│  │ }                    │  │ }                    │               │
-│  └─────────────────────┘  └─────────────────────┘               │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────┐ │
+│  │ satellite/abc123             │  │ satellite/def456             │ │
+│  │ { native_arch: "arm64",     │  │ { native_arch: "amd64",     │ │
+│  │   platforms: ["linux/arm64"],│  │   platforms: ["linux/amd64"],│ │
+│  │   status: "idle",           │  │   status: "idle",           │ │
+│  │   endpoint_addr: .. }       │  │   endpoint_addr: .. }       │ │
+│  └─────────────────────────────┘  └─────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
           ▲ set_bytes()          ▲ set_bytes()          ▲ get_many()
           │                      │                      │ subscribe()
@@ -352,7 +351,7 @@ The Station does **not** register itself as a satellite. It is the seed node tha
 | `/iroh-blobs/1` | ✔ | ✔ | ✔ |
 | `/iroh-gossip/1` | ✔ | ✔ | ✔ |
 | `/iroh-sync/1` | ✔ | ✔ | ✔ |
-| `ORBITBUILD/BUILD/0` | — | ✔ (accept, AccessLimit-gated) | — (dial) |
+| `ORBITBUILD/BUILD/0` | — | ✔ (accept) | — (dial) |
 
 All nodes run blobs + gossip + docs (required by iroh-docs). Only Satellites listen on the build ALPN, and only for known Doc members.
 
@@ -362,7 +361,7 @@ All nodes run blobs + gossip + docs (required by iroh-docs). Only Satellites lis
 
 ```
 orbitbuild
-├── iroh 0.97            — Endpoint, Router, ProtocolHandler, AccessLimit, EndpointAddr
+├── iroh                 — Endpoint, Router, ProtocolHandler, EndpointAddr
 ├── iroh-docs 0.97       — Docs, Doc, DocTicket, LiveEvent, Engine
 ├── iroh-blobs 0.99      — BlobsProtocol, MemStore (required by iroh-docs)
 ├── iroh-gossip 0.97     — Gossip (required by iroh-docs)
@@ -386,7 +385,7 @@ orbitbuild
 | `router` | Shared setup: spawn Router with Blobs + Gossip + Docs |
 | `station` | Station lifecycle (init, join) |
 | `satellite` | Satellite lifecycle (join, heartbeat, buildkitd supervision) |
-| `build_proxy` | `ProtocolHandler` for `ORBITBUILD/BUILD/0` ALPN (gated by AccessLimit) |
+| `build_proxy` | `ProtocolHandler` for `ORBITBUILD/BUILD/0` ALPN |
 | `mission_control` | Mission Control daemon (discover, proxy, buildx integration) |
 | `bridge` | Unix socket ↔ satellite tunnel management |
 | `docker` | Docker buildx CLI integration |
@@ -406,10 +405,10 @@ orbitbuild
 
 3. **Beacon is a DocTicket.** Membership in the Constellation is the sole authorization mechanism. The DocTicket's embedded capability keys control who can read and write the Doc. No separate shared secret.
 
-4. **Authorization through Doc membership.** Satellites use `AccessLimit` to reject connections from endpoints not present in the Doc's peer set. The Beacon (DocTicket) is the single gate — possessing it means you are a member.
+4. **Authorization through Beacon possession.** Possessing the Beacon (DocTicket) is the sole authorization mechanism. Any node that can import the Doc is a Constellation member and may connect to Satellites.
 
 5. **Local reads for discovery.** Mission Control reads satellite state from its local Doc replica — no round-trip to the Station. The Station can go offline after initial sync and existing peers continue to discover each other through gossip.
 
-6. **No application-level auth handshake.** iroh provides transport-layer authentication (ed25519 identities) and encryption (TLS 1.3). Authorization is enforced at the Router layer via AccessLimit. The build proxy is a pure byte pipe with no framing beyond QUIC streams.
+6. **No application-level auth handshake.** iroh provides transport-layer authentication (ed25519 identities) and encryption (TLS 1.3). The build proxy is a pure byte pipe with no framing beyond QUIC streams.
 
 7. **Sans-IO core logic.** Beacon serialization, Doc entry parsing, and arch detection are all testable without networking. Only the `ProtocolHandler::accept` implementations and `endpoint.connect()` calls touch the network.
