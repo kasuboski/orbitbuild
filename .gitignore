@@ -2,8 +2,6 @@ knowledge/repos
 
 # Rust/Cargo
 /target
-Cargo.lock
-
 
 # Added by cargo
 
