@@ -31,9 +31,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-rs
-        uses: dtolnay/install@latest
-        with:
-          crate: cross
+        run: cargo install cross --locked
 
       - name: Build static binary
         run: cross build --release --target ${{ matrix.target }} --locked
